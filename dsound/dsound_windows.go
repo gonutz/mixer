@@ -1,4 +1,4 @@
-package main
+package dsound
 
 /*
 #cgo LDFLAGS: -lkernel32
@@ -15,7 +15,7 @@ import (
 	"unsafe"
 )
 
-func initDirectSound(samplesPerSecond int) error {
+func InitDirectSound(samplesPerSecond int) error {
 	if samplesPerSecond <= 0 {
 		return errors.New(
 			"initDirectSound: illegal samplesPerSound: " +
@@ -26,23 +26,23 @@ func initDirectSound(samplesPerSecond int) error {
 	return makeError("initDirectSound", result, errContext)
 }
 
-func closeDirectSound() {
+func CloseDirectSound() {
 	C.closeDirectSound()
 }
 
-func startSound() error {
+func StartSound() error {
 	var errContext C.int
 	result := C.startSound(&errContext)
 	return makeError("startSound", result, errContext)
 }
 
-func stopSound() error {
+func StopSound() error {
 	var errContext C.int
 	result := C.stopSound(&errContext)
 	return makeError("stopSound", result, errContext)
 }
 
-func writeToSoundBuffer(data []byte, offset uint) error {
+func WriteToSoundBuffer(data []byte, offset uint) error {
 	buffer := C.CString(string(data))
 	defer C.free(unsafe.Pointer(buffer))
 	var errContext C.int
@@ -50,7 +50,7 @@ func writeToSoundBuffer(data []byte, offset uint) error {
 	return makeError("writeToSoundBuffer", result, errContext)
 }
 
-func getPlayAndWriteCursors() (play, write uint, err error) {
+func GetPlayAndWriteCursors() (play, write uint, err error) {
 	var playCursor, writeCursor C.DWORD
 	var errContext C.int
 	result := C.getPlayAndWriteCursors(&playCursor, &writeCursor, &errContext)

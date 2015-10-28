@@ -3,16 +3,18 @@ package main
 
 import (
 	"fmt"
+	"github.com/gonutz/mixer/dsound"
 	"github.com/gonutz/mixer/wav"
+	"sync"
 	"time"
 )
 
 func main() {
-	if err := initDirectSound(44100); err != nil {
+	if err := dsound.InitDirectSound(44100); err != nil {
 		fmt.Println(err)
 		return
 	}
-	defer closeDirectSound()
+	defer dsound.CloseDirectSound()
 
 	// load test WAV
 	music, err := wav.LoadFromFile("./music.wav")
@@ -26,8 +28,13 @@ func main() {
 	}
 	fmt.Println(drop)
 
-	mixer := newMixer(music.SoundChunks[0].Data)
-	go mixer.start()
+	mixer := newMixer()
+	mixer.Play(music.SoundChunks[0].Data)
+	go func() {
+		time.Sleep(3 * time.Second)
+		fmt.Println("Slience!")
+		mixer.SetVolume(0)
+	}()
 
 	fmt.Scanln()
 
@@ -36,47 +43,14 @@ func main() {
 	}
 }
 
-func makeTestData(data []byte) []byte {
-	sampleCount := len(data) / 4
-	i := 0
-	// shift the pitch by 2x
-	for ; i < sampleCount/2; i++ {
-		a, b := i*4, i*2*4
-		data[a] = data[b]
-		data[a+1] = data[b+1]
-		data[a+2] = data[b+2]
-		data[a+3] = data[b+3]
-	}
-	// silence the right half (simple pitch change by 2x halves the period)
-	for ; i < sampleCount; i++ {
-		a := i * 4
-		data[a] = 0
-		data[a+1] = 0
-		data[a+2] = 0
-		data[a+3] = 0
-	}
-	return data
-}
-
-func pan(data []byte) []byte {
-	count := len(data) / 2
-	for i := 0; i < count; i++ {
-		if i%2 == 1 {
-			lo, hi := data[i*2], data[i*2+1]
-			sound := int16(uint16(lo) | (uint16(hi) << 8))
-			sound /= 10
-			lo, hi = byte(uint16(sound)&0xFF), byte((uint16(sound)&0xFF00)>>8)
-			data[i*2], data[i*2+1] = lo, hi
-		}
-	}
-	return data
-}
-
-func newMixer(soundData []byte) *mixer {
+func newMixer() *mixer {
 	return &mixer{
-		soundData: soundData,
-		delay:     500 * time.Millisecond, // TODO maybe make this 1/4 of the
-		// sound buffer time (which right now is 2s)?
+		// TODO what should this time be? It has to be responsive so settings
+		// the volume, stopping sounds and other such actions do not cause a
+		// great delay
+		delay:   10 * time.Millisecond,
+		volume:  1.0,
+		changed: &syncBool{},
 	}
 }
 
@@ -86,74 +60,139 @@ type mixer struct {
 	nextWrite uint
 	playing   bool
 	delay     time.Duration
+	volume    float
 	err       error
+	changed   *syncBool
+}
+
+type syncBool struct {
+	sync.Mutex
+	value bool
+}
+
+func (b *syncBool) Set() {
+	b.Lock()
+	defer b.Unlock()
+	b.value = true
+}
+
+func (b *syncBool) GetAndReset() bool {
+	b.Lock()
+	defer b.Unlock()
+	value := b.value
+	b.value = false
+	return value
+}
+
+func (m *mixer) Play(data []byte) {
+	m.soundData = data
+	go m.start()
 }
 
 func (m *mixer) start() {
 	const bufferSize = 2 * 4 * 44100 // TODO know this from lib or set as parameter
 
+	pulse := time.Tick(m.delay)
 	for {
-		if m.err != nil || len(m.soundData) == 0 {
-			return
-		}
-
-		if !m.playing {
-			// special start condition, write a chunk of data to position 0
-
-			size := bufferSize
-			if size > len(m.soundData) {
-				size = len(m.soundData)
-			}
-
-			m.err = writeToSoundBuffer(m.soundData[:size], 0)
-			if m.err != nil {
-				return
-			}
-			m.soundData = m.soundData[size:]
-			m.nextWrite = uint(size % bufferSize)
-
-			m.err = startSound()
-			if m.err != nil {
-				return
-			}
-			m.playing = true
-		} else {
-			// while already playing, we need to find the play cursor and write
-			// up to that the next sound data, starting at where the last write
-			// ended
-
-			play, _, err := getPlayAndWriteCursors()
-			if err != nil {
-				m.err = err
+		select {
+		case <-pulse:
+			if m.err != nil || len(m.soundData) == 0 {
 				return
 			}
 
-			if play != m.lastPlay {
-				m.lastPlay = play
+			if !m.playing {
+				// special start condition, write a chunk of data to position 0
 
-				var size uint
-				if play > m.nextWrite {
-					size = play - m.nextWrite
-				} else if play < m.nextWrite {
-					size = (bufferSize - m.nextWrite) + play
+				size := bufferSize
+				if size > len(m.soundData) {
+					size = len(m.soundData)
 				}
 
-				// NOTE no else: if play == m.nextWrite we cannot yet write there
-				if size > 0 {
-					if size > uint(len(m.soundData)) {
-						size = uint(len(m.soundData))
+				m.err = dsound.WriteToSoundBuffer(m.adjust(m.soundData[:size]), 0)
+				if m.err != nil {
+					return
+				}
+				m.soundData = m.soundData[size:]
+				m.nextWrite = uint(size % bufferSize)
+
+				m.err = dsound.StartSound()
+				if m.err != nil {
+					return
+				}
+				m.playing = true
+			} else {
+				// while already playing, we need to find the play cursor and
+				// write up to that the next sound data, starting at where the
+				// last write ended
+
+				play, _, err := dsound.GetPlayAndWriteCursors()
+				if err != nil {
+					m.err = err
+					return
+				}
+
+				if play != m.lastPlay {
+					m.lastPlay = play
+
+					var size uint
+					if play > m.nextWrite {
+						size = play - m.nextWrite
+					} else if play < m.nextWrite {
+						size = (bufferSize - m.nextWrite) + play
 					}
 
-					m.err = writeToSoundBuffer(m.soundData[:size], m.nextWrite)
-					if m.err != nil {
-						return
+					// NOTE no else: if play == m.nextWrite we cannot yet write there
+					if size > 0 {
+						if size > uint(len(m.soundData)) {
+							size = uint(len(m.soundData))
+						}
+
+						m.err = dsound.WriteToSoundBuffer(m.adjust(m.soundData[:size]),
+							m.nextWrite)
+						if m.err != nil {
+							return
+						}
+						m.soundData = m.soundData[size:]
+						m.nextWrite = (m.nextWrite + size) % bufferSize
 					}
-					m.soundData = m.soundData[size:]
-					m.nextWrite = (m.nextWrite + size) % bufferSize
 				}
 			}
+		default:
+			time.Sleep(1 * time.Millisecond)
 		}
-
-		time.Sleep(m.delay)
 	}
+}
+
+func (m *mixer) SetVolume(scale float64) {
+	m.volume = float(scale)
+	m.changed.Set()
+}
+
+func (m *mixer) adjust(data []byte) []byte {
+	// TODO check what happens when rounding to max or min, make sure
+	// values do not clip at these bounds
+	const min = -32768
+	const max = 32767
+	count := len(data) / 2
+	for i := 0; i < count; i++ {
+		lo, hi := int16(uint16(data[i*2])), int16(data[i*2+1])
+		f := float(lo + 256*hi)
+		f *= m.volume
+		if f < min {
+			f = min + 0.1
+		}
+		if f > max {
+			f = max - 0.1
+		}
+		back := roundFloatToInt16(f)
+		data[i*2], data[i*2+1] = byte(back&0xFF), byte((back>>8)&0xFF)
+	}
+	return data
+}
+
+func roundFloatToInt16(f float) int16 {
+	if f > 0 {
+		return int16(f + 0.5)
+	}
+	return int16(f - 0.5)
 }
