@@ -1,4 +1,3 @@
-// TODO there is a noise at the start of playing -> what is it?
 // TODO error handling
 package mixer
 
@@ -221,7 +220,7 @@ func (m *mixer) SetVolume(v float64) {
 // soundSource
 
 func newSoundSource(w *wav.Wave, m *mixer) *soundSource {
-	return &soundSource{w.SoundChunks[0].Data, m, 1, 0}
+	return &soundSource{w.Data, m, 1, 0}
 }
 
 // TODO handle frequency modulation in here (fitting source to destination

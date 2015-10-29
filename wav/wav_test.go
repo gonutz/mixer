@@ -7,13 +7,13 @@ import (
 	"testing"
 )
 
-func TestFormat(t *testing.T) {
+func TestStringFormatting(t *testing.T) {
 	if s := fmt.Sprintf("%v", uint32(123)); s != "123" {
 		t.Error(s)
 	}
 }
 
-func TestRiffError(t *testing.T) {
+func TestFormattingErrors(t *testing.T) {
 	tests := []struct {
 		name       string
 		input      []byte

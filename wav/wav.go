@@ -1,10 +1,7 @@
 // Package wav provides functions to load audio files in the WAV (wave) format.
 // Only uncompressed PCM formats are supported.
-// Unknown chunks in the WAV file (like a LIST chunk which may contain
-// additional information in the form of tags) are simply ignored when loading.
+// Unknown chunks in the WAV file are simply ignored when loading.
 package wav
-
-// TODO function comments
 
 import (
 	"bytes"
@@ -14,20 +11,20 @@ import (
 	"io"
 	"io/ioutil"
 	"os"
-	"strings"
 )
 
+// Wave contains uncompressed PCM data with samples interleaved, e.g. for 2
+// channels the layout is:
+//    channel1[0] channel2[0] channel1[1] channel2[1] channel1[2] channel2[2]...
 type Wave struct {
-	SoundChunks []SoundChunk
-}
-
-type SoundChunk struct {
 	ChannelCount     int
 	SamplesPerSecond int
 	BitsPerSample    int
 	Data             []byte
+	formatWasRead    bool
 }
 
+// LoadFromFile opens the given file and calls Load on it.
 func LoadFromFile(path string) (*Wave, error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -38,6 +35,9 @@ func LoadFromFile(path string) (*Wave, error) {
 	return Load(file)
 }
 
+// Load loads sound data in the WAV format. It assumes that the data is in
+// uncompressed PCM format and has exactly one format chunk and one data chunk.
+// Unknown chunks are ignored.
 func Load(r io.Reader) (*Wave, error) {
 	var header waveHeader
 	if err := binary.Read(r, endiannes, &header); err != nil {
@@ -82,6 +82,10 @@ func (wav *Wave) parse(r *bytes.Reader) error {
 	}
 
 	if header.ChunkID == formatChunkID {
+		if wav.formatWasRead {
+			return errors.New("load WAV: two format chunks detected")
+		}
+
 		var chunk formatChunkExtended
 		if header.ChunkSize == 16 {
 			if err := binary.Read(r, endiannes, &(chunk.formatChunkBase)); err != nil {
@@ -107,27 +111,23 @@ func (wav *Wave) parse(r *bytes.Reader) error {
 				chunk.FormatTag)
 		}
 
-		soundChunk := SoundChunk{
-			ChannelCount:     int(chunk.Channels),
-			SamplesPerSecond: int(chunk.SamplesPerSec),
-			BitsPerSample:    int(chunk.BitsPerSample),
-		}
-		wav.SoundChunks = append(wav.SoundChunks, soundChunk)
+		wav.ChannelCount = int(chunk.Channels)
+		wav.SamplesPerSecond = int(chunk.SamplesPerSec)
+		wav.BitsPerSample = int(chunk.BitsPerSample)
+		wav.formatWasRead = true
 	} else if header.ChunkID == dataChunkID {
 		data := make([]byte, header.ChunkSize)
 		if _, err := io.ReadFull(r, data); err != nil {
 			return err
 		}
 
-		last := len(wav.SoundChunks) - 1
-		if last == -1 {
+		if len(wav.Data) > 0 {
+			return errors.New("load WAV: multiple data chunks found")
+		}
+		if !wav.formatWasRead {
 			return errors.New("load WAV: found data chunk before format chunk")
 		}
-		if wav.SoundChunks[last].Data == nil {
-			wav.SoundChunks[last].Data = data
-		} else {
-			wav.SoundChunks[last].Data = append(wav.SoundChunks[last].Data, data...)
-		}
+		wav.Data = data
 
 		if header.ChunkSize%2 == 1 {
 			// there is one byte padding if the chunk size is odd
@@ -141,7 +141,7 @@ func (wav *Wave) parse(r *bytes.Reader) error {
 	}
 
 	if r.Len() == 0 {
-		if len(wav.SoundChunks) == 0 {
+		if !wav.formatWasRead {
 			return errors.New("load WAV: file does not contain format information")
 		}
 		return nil
@@ -150,25 +150,13 @@ func (wav *Wave) parse(r *bytes.Reader) error {
 	return wav.parse(r)
 }
 
+// String prints the format information and data size in a human readable
+// manner.
 func (wav *Wave) String() string {
-	if len(wav.SoundChunks) == 0 {
-		return "Wave{}"
-	}
-	if len(wav.SoundChunks) == 1 {
-		return "Wave{" + wav.SoundChunks[0].String() + "}"
-	}
-	chunkStrings := make([]string, len(wav.SoundChunks))
-	for i := range wav.SoundChunks {
-		chunkStrings[i] = "{" + wav.SoundChunks[i].String() + "}"
-	}
-	return "Wave{" + strings.Join(chunkStrings, ",") + "}"
-}
-
-func (s SoundChunk) String() string {
 	return fmt.Sprintf(
-		"%v channels, %v bits/sample, %v samples/sec, %v samples (%v bytes)",
-		s.ChannelCount, s.BitsPerSample, s.SamplesPerSecond,
-		len(s.Data)/(s.ChannelCount*s.BitsPerSample/8), len(s.Data),
+		"Wave{%v channels, %v bits/sample, %v samples/sec, %v samples (%v bytes)}",
+		wav.ChannelCount, wav.BitsPerSample, wav.SamplesPerSecond,
+		len(wav.Data)/(wav.ChannelCount*wav.BitsPerSample/8), len(wav.Data),
 	)
 }
 
