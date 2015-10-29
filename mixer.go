@@ -13,30 +13,39 @@ type Mixer interface {
 	Start()
 	Stop() error
 	Play(*wav.Wave) Sound
+	SetVolume(float64)
 }
 
 // TODO what about parameters outside the range of [0..1] (for volume) or
 // [-1..1] (for pitch)
 type Sound interface {
-	SetVolume(float64)
 	Playing() bool
+	SetVolume(float64)
+	Volume() float64
+	SetPitch(float64) // -1=left, 0=both, 1=right
+	Pitch() float64
+
 	// TODO:
-	// Volume() float64
 	// Pause()
 	// Unpause()
 	// Stop()
 	// go to position?
-	// SetPitch(float64) // -1=left, 0=both, 1=right
-	// Pitch() float64
 }
 
 func New() Mixer {
+	const bytesPerSecond = 44100 * 2      // TODO init DS here and set this
+	writeAhead := bytesPerSecond / 10     // buffer 100ms
+	const sampleSize = 4                  // 2 channels, 16 bit each
+	writeAhead -= writeAhead % sampleSize // should be dividable into samples
+	buffer := make([]byte, writeAhead)
+
 	return &mixer{
-		writeAheadByteCount: 44100 / 5, // TODO what should this be? 1/10 buffer size?
+		writeAheadByteCount: writeAhead, // TODO what should this be? 1/10 buffer size?
 		volume:              1,
 		updateDelay:         10 * time.Millisecond,
 		changed:             &syncBool{},
 		stop:                make(chan bool),
+		mixBuffer:           buffer,
 	}
 }
 
@@ -52,13 +61,14 @@ type mixer struct {
 	volume      float
 	updateDelay time.Duration
 	// playing indicates that the sound card is currently outputting sound
-	playing bool
-	stop    chan bool
+	playing   bool
+	stop      chan bool
+	mixBuffer []byte
 }
 
 func (m *mixer) Start() {
 	go func() {
-		pulse := time.Tick(m.updateDelay)
+		pulse := time.Tick(m.updateDelay) // make the delay const
 		for {
 			select {
 			case <-pulse:
@@ -66,7 +76,7 @@ func (m *mixer) Start() {
 			case <-m.stop:
 				return
 			default:
-				time.Sleep(1 * time.Millisecond) // TODO really?
+				time.Sleep(1 * time.Millisecond)
 			}
 		}
 	}()
@@ -125,16 +135,22 @@ func (m *mixer) update() {
 }
 
 func (m *mixer) remix() []byte {
-	buf := make([]byte, m.writeAheadByteCount) // TODO only allocate this once
-	for i := 0; i < len(buf); i += 2 {
+	for i := 0; i < len(m.mixBuffer); i += 2 {
 		var f float
 		for _, source := range m.sources {
-			f += source.floatSampleAt(i) * source.volume
+			factor := source.volume
+			if i%4 == 0 && source.pitch > 0 {
+				factor *= 1 - source.pitch
+			}
+			if i%4 == 2 && source.pitch < 0 {
+				factor *= 1 + source.pitch
+			}
+			f += source.floatSampleAt(i) * factor
 		}
 		f *= m.volume
-		buf[i], buf[i+1] = floatSampleToBytes(f)
+		m.mixBuffer[i], m.mixBuffer[i+1] = floatSampleToBytes(f)
 	}
-	return buf
+	return m.mixBuffer
 }
 
 func bytesToFloatSample(b1, b2 byte) float {
@@ -202,24 +218,47 @@ func (m *mixer) SetVolume(v float64) {
 	m.volume = float(v)
 }
 
-// TODO handle frequency modulation in here (1. fitting source to destination
-// samples/sec and 2. simple pitch shift)
+// soundSource
+
+func newSoundSource(w *wav.Wave, m *mixer) *soundSource {
+	return &soundSource{w.SoundChunks[0].Data, m, 1, 0}
+}
+
+// TODO handle frequency modulation in here (fitting source to destination
+// samples/sec)?
 type soundSource struct {
 	data   []byte
 	mixer  *mixer
 	volume float
+	pitch  float
 }
 
 func (s *soundSource) SetVolume(v float64) {
-	if s.mixer == nil {
-		return
+	if s.mixer != nil {
+		s.mixer.changed.Lock()
+		defer s.mixer.changed.Unlock()
+		s.mixer.changed.value = true
 	}
 
-	s.mixer.changed.Lock()
-	defer s.mixer.changed.Unlock()
-	s.mixer.changed.value = true
-
 	s.volume = float(v)
+}
+
+func (s *soundSource) Volume() float64 {
+	return float64(s.volume)
+}
+
+func (s *soundSource) SetPitch(p float64) {
+	if s.mixer != nil {
+		s.mixer.changed.Lock()
+		defer s.mixer.changed.Unlock()
+		s.mixer.changed.value = true
+	}
+
+	s.pitch = float(p)
+}
+
+func (s *soundSource) Pitch() float64 {
+	return float64(s.pitch)
 }
 
 func (s *soundSource) Playing() bool {
@@ -236,10 +275,6 @@ func (s *soundSource) forget(byteCount int) {
 	} else {
 		s.data = s.data[byteCount:]
 	}
-}
-
-func newSoundSource(w *wav.Wave, m *mixer) *soundSource {
-	return &soundSource{w.SoundChunks[0].Data, m, 1}
 }
 
 func (s *soundSource) floatSampleAt(index int) float {
