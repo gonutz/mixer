@@ -1,5 +1,5 @@
 //+build float64
 
-package main
+package mixer
 
 type float float64

@@ -1,72 +1,27 @@
 // TODO there is a noise at the start of playing -> what is it?
-package main
+// TODO error handling
+package mixer
 
 import (
-	"fmt"
 	"github.com/gonutz/mixer/dsound"
 	"github.com/gonutz/mixer/wav"
 	"sync"
 	"time"
 )
 
-func main() {
-	if err := dsound.InitDirectSound(44100); err != nil {
-		fmt.Println(err)
-		return
-	}
-	defer dsound.CloseDirectSound()
-
-	// load test WAV
-	soundNames := []string{
-		"music",
-		"test",
-		"switch",
-		"oil_drop",
-		"next_track",
-	}
-	sounds := make(map[string]*wav.Wave)
-	for _, name := range soundNames {
-		s, err := wav.LoadFromFile("./" + name + ".wav")
-		if err != nil {
-			panic(err)
-		}
-		sounds[name] = s
-	}
-
-	mixer := newMixer()
-	//mixer.Play(sounds["test"])
-	//mixer.Play(sounds["switch"])
-	//mixer.Play(sounds["oil_drop"])
-	//mixer.Play(sounds["next_track"])
-	music := mixer.Play(sounds["music"])
-	mixer.Start()
-	defer mixer.Stop()
-
-	for i := 0; i < 10; i++ {
-		time.Sleep(1500 * time.Millisecond)
-		fmt.Println("blop")
-		mixer.Play(sounds["oil_drop"])
-
-		if i == 3 {
-			fmt.Println("sshhhhh")
-			music.SetVolume(0.1)
-		}
-		if i == 6 {
-			fmt.Println("huh?")
-			music.SetVolume(1.0)
-		}
-	}
-
-	time.Sleep(1 * time.Second)
-
-	//if mixer.err != nil {
-	//	panic(mixer.err)
-	//}
+type Mixer interface {
+	Start()
+	Stop() error
+	Play(*wav.Wave) Sound
 }
 
-func newMixer() *mixer {
+type Sound interface {
+	SetVolume(float)
+	Playing() bool
+}
+
+func New() Mixer {
 	return &mixer{
-		//writeAheadByteCount: 44100 * 2, // TODO what should this be? 1/10 buffer size?
 		writeAheadByteCount: 44100 / 5, // TODO what should this be? 1/10 buffer size?
 		volume:              1,
 		updateDelay:         10 * time.Millisecond,
@@ -132,8 +87,8 @@ func (m *mixer) update() {
 		dsound.StartSound()
 		m.playing = true
 	} else {
-		m.changed.value = false // TODO remove
-		if !m.changed.value {
+		m.changed.value = true // TODO remove this or maybe make this the default?
+		if m.changed.value {
 			play, write, _ := dsound.GetPlayAndWriteCursors()
 			if write != m.writeCursor {
 				var delta uint
@@ -145,39 +100,17 @@ func (m *mixer) update() {
 				}
 				m.makeSourcesForget(int(delta))
 
-				// TODO instead of this, only compute the sound data that is not
-				// yet written and write it in here
+				// rewrite the whole look-ahead with newly mixed data
 				dsound.WriteToSoundBuffer(m.remix(), write)
 			}
 			m.playCursor, m.writeCursor = play, write
 			m.changed.value = false
 		} else {
-			// TODO
+			// TODO instead of re-writing the whole look-ahead, only compute the
+			// sound data that is not yet written and append it at the end of
+			// what is already written, e.g.
+			//dsound.WriteToSoundBuffer(m.mix(), write+writeAheadByteCount-m.writeCursor)?
 		}
-	}
-}
-
-func (m *mixer) makeSourcesForget(byteCount int) {
-	atLeastOneSourceIsDone := false
-	for _, source := range m.sources {
-		if source == nil {
-			fmt.Println("how can this be nil?")
-		}
-		source.forget(byteCount)
-		if source.isDone() {
-			atLeastOneSourceIsDone = true
-		}
-	}
-
-	if atLeastOneSourceIsDone {
-		fmt.Print(m.sources, " -> ")
-		for i := 0; i < len(m.sources); i++ {
-			if m.sources[i].isDone() {
-				m.sources = append(m.sources[:i], m.sources[i+1:]...)
-				i--
-			}
-		}
-		fmt.Println(m.sources)
 	}
 }
 
@@ -221,18 +154,34 @@ func roundFloatToInt16(f float) int16 {
 	return int16(f - 0.5)
 }
 
+func (m *mixer) makeSourcesForget(byteCount int) {
+	atLeastOneSourceIsDone := false
+	for _, source := range m.sources {
+		source.forget(byteCount)
+		if source.isDone() {
+			atLeastOneSourceIsDone = true
+		}
+	}
+
+	if atLeastOneSourceIsDone {
+		for i := 0; i < len(m.sources); i++ {
+			if m.sources[i].isDone() {
+				m.sources[i].mixer = nil
+				m.sources = append(m.sources[:i], m.sources[i+1:]...)
+				i--
+			}
+		}
+	}
+}
+
 func (m *mixer) Play(sound *wav.Wave) Sound {
 	m.changed.Lock()
 	defer m.changed.Unlock()
 	m.changed.value = true
 
-	source := newSoundSource(sound)
+	source := newSoundSource(sound, m)
 	m.sources = append(m.sources, source)
 	return source
-}
-
-type Sound interface {
-	SetVolume(float)
 }
 
 func (m *mixer) SetVolume(v float64) {
@@ -247,12 +196,31 @@ func (m *mixer) SetVolume(v float64) {
 // samples/sec and 2. simple pitch shift)
 type soundSource struct {
 	data   []byte
+	mixer  *mixer
 	volume float
 }
 
 func (s *soundSource) SetVolume(v float) {
-	// TODO sync this (with mixer)? or is it OK this way?
+	if s.mixer == nil {
+		return
+	}
+
+	s.mixer.changed.Lock()
+	defer s.mixer.changed.Unlock()
+	s.mixer.changed.value = true
+
 	s.volume = v
+}
+
+func (s *soundSource) Playing() bool {
+	if s.mixer == nil {
+		return false
+	}
+
+	s.mixer.changed.Lock()
+	defer s.mixer.changed.Unlock()
+
+	return len(s.data) != 0
 }
 
 func (s *soundSource) isDone() bool {
@@ -267,8 +235,8 @@ func (s *soundSource) forget(byteCount int) {
 	}
 }
 
-func newSoundSource(w *wav.Wave) *soundSource {
-	return &soundSource{w.SoundChunks[0].Data, 1}
+func newSoundSource(w *wav.Wave, m *mixer) *soundSource {
+	return &soundSource{w.SoundChunks[0].Data, m, 1}
 }
 
 func (s *soundSource) floatSampleAt(index int) float {
