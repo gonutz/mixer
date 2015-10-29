@@ -9,11 +9,11 @@ import (
 )
 
 func main() {
-	if err := dsound.InitDirectSound(44100); err != nil {
+	if err := dsound.Init(44100); err != nil {
 		fmt.Println(err)
 		return
 	}
-	defer dsound.CloseDirectSound()
+	defer dsound.Close()
 
 	// load test WAV
 	soundNames := []string{

@@ -15,7 +15,7 @@ import (
 	"unsafe"
 )
 
-func InitDirectSound(samplesPerSecond int) error {
+func Init(samplesPerSecond int) error {
 	if samplesPerSecond <= 0 {
 		return errors.New(
 			"initDirectSound: illegal samplesPerSound: " +
@@ -26,7 +26,7 @@ func InitDirectSound(samplesPerSecond int) error {
 	return makeError("initDirectSound", result, errContext)
 }
 
-func CloseDirectSound() {
+func Close() {
 	C.closeDirectSound()
 }
 

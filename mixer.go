@@ -15,9 +15,19 @@ type Mixer interface {
 	Play(*wav.Wave) Sound
 }
 
+// TODO what about parameters outside the range of [0..1] (for volume) or
+// [-1..1] (for pitch)
 type Sound interface {
-	SetVolume(float)
+	SetVolume(float64)
 	Playing() bool
+	// TODO:
+	// Volume() float64
+	// Pause()
+	// Unpause()
+	// Stop()
+	// go to position?
+	// SetPitch(float64) // -1=left, 0=both, 1=right
+	// Pitch() float64
 }
 
 func New() Mixer {
@@ -200,7 +210,7 @@ type soundSource struct {
 	volume float
 }
 
-func (s *soundSource) SetVolume(v float) {
+func (s *soundSource) SetVolume(v float64) {
 	if s.mixer == nil {
 		return
 	}
@@ -209,7 +219,7 @@ func (s *soundSource) SetVolume(v float) {
 	defer s.mixer.changed.Unlock()
 	s.mixer.changed.value = true
 
-	s.volume = v
+	s.volume = float(v)
 }
 
 func (s *soundSource) Playing() bool {
