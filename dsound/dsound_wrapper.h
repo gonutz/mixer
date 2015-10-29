@@ -24,6 +24,8 @@
 HRESULT initDirectSound(DWORD samplesPerSecond, int* errorContext);
 void closeDirectSound();
 
+DWORD getBufferSize();
+
 HRESULT startSound(int* errorContext);
 HRESULT stopSound(int* errorContext);
 

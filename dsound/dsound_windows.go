@@ -30,6 +30,10 @@ func CloseDirectSound() {
 	C.closeDirectSound()
 }
 
+func BufferSize() uint {
+	return uint(C.getBufferSize())
+}
+
 func StartSound() error {
 	var errContext C.int
 	result := C.startSound(&errContext)

@@ -3,6 +3,7 @@
 static LPDIRECTSOUND DirectSoundObject = 0;
 static LPDIRECTSOUNDBUFFER PrimarySoundBuffer = 0;
 static LPDIRECTSOUNDBUFFER GlobalSoundBuffer = 0;
+static DWORD bufferSize = 0;
 
 typedef HRESULT WINAPI direct_sound_create(
 	LPCGUID DeviceGuid,
@@ -86,7 +87,8 @@ HRESULT initDirectSound(DWORD samplesPerSecond, int* errorContext) {
 	// -> maybe have a go function take a time as paramter for specifying how
 	// long the buffer should be and then compute the respective byte size and
 	// pass it in to this function
-	secondaryBufferDescription.dwBufferBytes = 2*waveFormat.nAvgBytesPerSec;
+	bufferSize = 2*waveFormat.nAvgBytesPerSec;
+	secondaryBufferDescription.dwBufferBytes = bufferSize;
 	secondaryBufferDescription.lpwfxFormat = &waveFormat;
 	result = directSound->lpVtbl->CreateSoundBuffer(
 		directSound,
@@ -108,9 +110,14 @@ HRESULT initDirectSound(DWORD samplesPerSecond, int* errorContext) {
 #define ReleaseObject(obj) if (obj) {obj->lpVtbl->Release(obj);	obj = 0;}
 
 void closeDirectSound() {
+	bufferSize = 0;
 	ReleaseObject(GlobalSoundBuffer);
 	ReleaseObject(PrimarySoundBuffer);
 	ReleaseObject(DirectSoundObject);
+}
+
+DWORD getBufferSize() {
+	return bufferSize;
 }
 
 HRESULT startSound(int* errorContext) {
