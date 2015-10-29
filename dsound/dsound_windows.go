@@ -15,6 +15,10 @@ import (
 	"unsafe"
 )
 
+// Init sets up DirectSound and creates a sound buffer with 2 channels, 16 bit
+// samples and the given sample frequency. The buffer is not played until you
+// call StartSound.
+// Make sure to call Close when you are done with DirectSound.
 func Init(samplesPerSecond int) error {
 	if samplesPerSecond <= 0 {
 		return errors.New(
@@ -26,26 +30,36 @@ func Init(samplesPerSecond int) error {
 	return makeError("initDirectSound", result, errContext)
 }
 
+// Close releases all resources that were allocated when initializing
+// DirectSound. It will stop playing the sound, if any.
 func Close() {
 	C.closeDirectSound()
 }
 
+// BufferSize returns the size in bytes of the sound buffer that you write to
+// with WriteToSoundBuffer. When DirectSound is not initialized this value is 0.
 func BufferSize() uint {
 	return uint(C.getBufferSize())
 }
 
+// StartSound must be called after initialization to make the sound buffer
+// audible.
 func StartSound() error {
 	var errContext C.int
 	result := C.startSound(&errContext)
 	return makeError("startSound", result, errContext)
 }
 
+// StopSound stops playing the sound buffer.
 func StopSound() error {
 	var errContext C.int
 	result := C.stopSound(&errContext)
 	return makeError("stopSound", result, errContext)
 }
 
+// WriteToSoundBuffer locks the sound buffer and writes the given data into it,
+// starting at the given byte offset. The buffer is a ring buffer so writing
+// outside the bounds will wrap around and continue writing to the beginning.
 func WriteToSoundBuffer(data []byte, offset uint) error {
 	buffer := C.CString(string(data))
 	defer C.free(unsafe.Pointer(buffer))
@@ -54,6 +68,17 @@ func WriteToSoundBuffer(data []byte, offset uint) error {
 	return makeError("writeToSoundBuffer", result, errContext)
 }
 
+// GetPlayAndWriteCursors returns the play and write cursors. These are byte
+// offsets into the sound buffer. The range between the two is commited to the
+// sound card for playing so it is not safe to write into that area. According
+// to the DirectSound documentation this area is usually about 15ms worth of
+// data but a test on Windows 8 showed a value of 30ms.
+// Note that the sound buffer is a ring buffer which is why the play cursor,
+// which indicates the start of the commited region, can be a higher value than
+// the write cursor, which indicates the end of the commited region.
+// In the non-border case the play cursor will be less than the write cursor.
+// You can safely  write sound data starting at the write cursor and ending at
+// the play cursor.
 func GetPlayAndWriteCursors() (play, write uint, err error) {
 	var playCursor, writeCursor C.DWORD
 	var errContext C.int

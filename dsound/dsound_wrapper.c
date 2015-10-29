@@ -207,7 +207,7 @@ HRESULT copyToSoundBuffer(DWORD offset, char* data, DWORD byteCount, int* errorC
 	}
 	
 	char* output = (char*)region1;
-	int i;
+	DWORD i;
 	for (i = 0; i < region1Size; ++i) {
 		*output++ = *data++;
 	}
