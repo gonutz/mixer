@@ -213,13 +213,6 @@ func (s *soundSource) SetVolume(v float) {
 }
 
 func (s *soundSource) Playing() bool {
-	if s.mixer == nil {
-		return false
-	}
-
-	s.mixer.changed.Lock()
-	defer s.mixer.changed.Unlock()
-
 	return len(s.data) != 0
 }
 
