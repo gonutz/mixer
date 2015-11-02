@@ -25,9 +25,16 @@ type Mixer interface {
 // so she can do it herself.
 type Sound interface {
 	//Play()
-	//Pause()
+	//Stop()
+
+	SetPaused(bool)
+
+	Paused() bool
+
 	//SetPositionOffset(time.Duration)
+
 	Playing() bool
+
 	// SetVolume sets the volume factor for all channels. Its range is [0..1]
 	// and it will be clamped to that range.
 	// Note that the audible difference in loudness between 100% and 50% is the
@@ -35,7 +42,10 @@ type Sound interface {
 	// logarithmic scale will sound to the human ear as if you decrease the
 	// sound by equal steps.
 	SetVolume(float64)
+
+	// Volume returns a value in the range of 0 (silent) to 1 (full volume).
 	Volume() float64
+
 	// SetPan changes the volume ratio between left and right output channel.
 	// Setting it to -1 will make channel 1 (left speaker) output at 100% volume
 	// while channel 2 (right speaker) has a volume of 0%.
@@ -43,6 +53,10 @@ type Sound interface {
 	// speaker is silenced.
 	// This value is clamped to [-1..1]
 	SetPan(float64)
+
+	// Pan returns the current pan as a value in the range of -1 (only left
+	// speaker) to 1 (only right speaker). A value of 0 means both speakers play
+	// at full volume.
 	Pan() float64
 }
 
@@ -54,31 +68,53 @@ func New() Mixer {
 	buffer := make([]byte, writeAhead)
 
 	return &mixer{
-		writeAheadByteCount: writeAhead, // TODO what should this be? 1/10 buffer size?
-		volume:              1,
-		updateDelay:         10 * time.Millisecond,
-		changed:             &syncBool{},
-		stop:                make(chan bool),
-		mixBuffer:           buffer,
+		volume:      1,
+		updateDelay: 10 * time.Millisecond,
+		changed:     &syncBool{},
+		stop:        make(chan bool),
+		mixBuffer:   buffer,
 	}
 }
 
 type mixer struct {
-	playCursor, writeCursor uint
-	sources                 []*soundSource
-	// writeAheadByteCount is the number of bytes that will be computed and
-	// written in front of the write cursor
-	writeAheadByteCount int
+	// writeCursor keeps the offset into DirectSound's ring buffer at which data
+	// was written last
+	writeCursor uint
+
+	// sources are all currently active sound sources from which the mixed
+	// sound output is mixed
+	sources []*soundSource
+
 	// changed indicates that the pre-written sound data needs to be updated
 	// because the state since pre-computing it has changed
-	changed     *syncBool
-	volume      float
+	changed *syncBool
+
+	// volume is in the range from 0 (silent) to 1 (full volume)
+	volume float
+
+	// updateDelay is the time between two updates of the mixer
 	updateDelay time.Duration
+
 	// playing indicates that the sound card is currently outputting sound
-	playing   bool
-	stop      chan bool
+	playing bool
+
+	// stop is a signalling so the mixer knows when to stop updating (which
+	// happens in a separate Go routine)
+	stop chan bool
+
+	// mixBuffer is the buffer for mixing the sound sources; its size is the
+	// number of bytes that are output to the sound card for being played in the
+	// future
 	mixBuffer []byte
-	err       error
+
+	// err keeps the last error encountered by the mixer; it can be queried by
+	// the client with the Error function
+	err error
+}
+
+type syncBool struct {
+	sync.Mutex
+	value bool
 }
 
 func (m *mixer) Error() error {
@@ -86,6 +122,8 @@ func (m *mixer) Error() error {
 }
 
 func (m *mixer) Start() {
+	// TODO init DirectSound here and set it to desired parameters
+
 	go func() {
 		pulse := time.Tick(m.updateDelay) // make the delay const
 		for {
@@ -142,7 +180,7 @@ func (m *mixer) update() {
 				// rewrite the whole look-ahead with newly mixed data
 				dsound.WriteToSoundBuffer(m.remix(), write)
 			}
-			m.playCursor, m.writeCursor = play, write
+			_, m.writeCursor = play, write
 			m.changed.value = false
 		} else {
 			// TODO instead of re-writing the whole look-ahead, only compute the
@@ -157,6 +195,9 @@ func (m *mixer) remix() []byte {
 	for i := 0; i < len(m.mixBuffer); i += 2 {
 		var f float
 		for _, source := range m.sources {
+			if source.paused {
+				continue
+			}
 			factor := source.volume
 			if i%4 == 0 && source.pan > 0 {
 				factor *= 1 - source.pan
@@ -202,6 +243,9 @@ func roundFloatToInt16(f float) int16 {
 func (m *mixer) makeSourcesForget(byteCount int) {
 	atLeastOneSourceIsDone := false
 	for _, source := range m.sources {
+		if source.paused {
+			continue
+		}
 		source.forget(byteCount)
 		if source.isDone() {
 			atLeastOneSourceIsDone = true
@@ -243,7 +287,11 @@ func (m *mixer) SetVolume(v float64) {
 // soundSource
 
 func newSoundSource(w *wav.Wave, m *mixer) *soundSource {
-	return &soundSource{w.Data, m, 1, 0}
+	return &soundSource{
+		data:   w.Data,
+		mixer:  m,
+		volume: 1,
+	}
 }
 
 // TODO handle frequency modulation in here (fitting source to destination
@@ -251,6 +299,7 @@ func newSoundSource(w *wav.Wave, m *mixer) *soundSource {
 type soundSource struct {
 	data   []byte
 	mixer  *mixer
+	paused bool
 	volume float
 	pan    float
 }
@@ -296,7 +345,7 @@ func (s *soundSource) Pan() float64 {
 }
 
 func (s *soundSource) Playing() bool {
-	return len(s.data) != 0
+	return len(s.data) != 0 && !s.paused
 }
 
 func (s *soundSource) isDone() bool {
@@ -318,7 +367,10 @@ func (s *soundSource) floatSampleAt(index int) float {
 	return bytesToFloatSample(s.data[index], s.data[index+1])
 }
 
-type syncBool struct {
-	sync.Mutex
-	value bool
+func (s *soundSource) SetPaused(paused bool) {
+	s.paused = paused
+}
+
+func (s *soundSource) Paused() bool {
+	return s.paused
 }

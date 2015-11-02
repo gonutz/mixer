@@ -10,7 +10,13 @@ import (
 // Wave structure is returned and its data is converted to the specified format.
 // In any case the original data is not changed.
 func ConvertTo44100Hz2Channels16BitSamples(w *Wave) *Wave {
-	if w.SamplesPerSecond == 44100 && w.ChannelCount == 2 && w.BitsPerSample == 16 {
+	if w.SamplesPerSecond == 44100 &&
+		w.ChannelCount == 2 &&
+		w.BitsPerSample == 16 {
+		return w
+	}
+
+	if len(w.Data) == 0 {
 		return w
 	}
 
