@@ -1,4 +1,6 @@
-// TODO error handling
+// TODO package doc
+// TODO make sure sample length are % 4 so there is no []byte index panic
+
 package mixer
 
 import (
@@ -13,22 +15,35 @@ type Mixer interface {
 	Stop() error
 	Play(*wav.Wave) Sound
 	SetVolume(float64)
+	Error() error
 }
 
-// TODO what about parameters outside the range of [0..1] (for volume) or
-// [-1..1] (for pitch)
+// TODO maybe be able to set the volume per channel instead of only changing
+// the pan, this way a higher level lib can provide pan change functionality
+// and additional operations; on the other hand this lib could provide other
+// functions as well when needed or simplye give the user the per-channel volume
+// so she can do it herself.
 type Sound interface {
+	//Play()
+	//Pause()
+	//SetPositionOffset(time.Duration)
 	Playing() bool
+	// SetVolume sets the volume factor for all channels. Its range is [0..1]
+	// and it will be clamped to that range.
+	// Note that the audible difference in loudness between 100% and 50% is the
+	// same as between 50% and 25% and so on. Changing the sound on a
+	// logarithmic scale will sound to the human ear as if you decrease the
+	// sound by equal steps.
 	SetVolume(float64)
 	Volume() float64
-	SetPitch(float64) // -1=left, 0=both, 1=right
-	Pitch() float64
-
-	// TODO:
-	// Pause()
-	// Unpause()
-	// Stop()
-	// go to position?
+	// SetPan changes the volume ratio between left and right output channel.
+	// Setting it to -1 will make channel 1 (left speaker) output at 100% volume
+	// while channel 2 (right speaker) has a volume of 0%.
+	// A pan of 0 means both speakers' volumes are at 100%, +1 means the left
+	// speaker is silenced.
+	// This value is clamped to [-1..1]
+	SetPan(float64)
+	Pan() float64
 }
 
 func New() Mixer {
@@ -63,6 +78,11 @@ type mixer struct {
 	playing   bool
 	stop      chan bool
 	mixBuffer []byte
+	err       error
+}
+
+func (m *mixer) Error() error {
+	return m.err // TODO assign this when an error occurs
 }
 
 func (m *mixer) Start() {
@@ -138,11 +158,11 @@ func (m *mixer) remix() []byte {
 		var f float
 		for _, source := range m.sources {
 			factor := source.volume
-			if i%4 == 0 && source.pitch > 0 {
-				factor *= 1 - source.pitch
+			if i%4 == 0 && source.pan > 0 {
+				factor *= 1 - source.pan
 			}
-			if i%4 == 2 && source.pitch < 0 {
-				factor *= 1 + source.pitch
+			if i%4 == 2 && source.pan < 0 {
+				factor *= 1 + source.pan
 			}
 			f += source.floatSampleAt(i) * factor
 		}
@@ -214,6 +234,9 @@ func (m *mixer) SetVolume(v float64) {
 	defer m.changed.Unlock()
 	m.changed.value = true
 
+	if v < 0 {
+		v = 0
+	}
 	m.volume = float(v)
 }
 
@@ -229,7 +252,7 @@ type soundSource struct {
 	data   []byte
 	mixer  *mixer
 	volume float
-	pitch  float
+	pan    float
 }
 
 func (s *soundSource) SetVolume(v float64) {
@@ -239,6 +262,12 @@ func (s *soundSource) SetVolume(v float64) {
 		s.mixer.changed.value = true
 	}
 
+	if v < 0 {
+		v = 0
+	}
+	if v > 1 {
+		v = 1
+	}
 	s.volume = float(v)
 }
 
@@ -246,18 +275,24 @@ func (s *soundSource) Volume() float64 {
 	return float64(s.volume)
 }
 
-func (s *soundSource) SetPitch(p float64) {
+func (s *soundSource) SetPan(p float64) {
 	if s.mixer != nil {
 		s.mixer.changed.Lock()
 		defer s.mixer.changed.Unlock()
 		s.mixer.changed.value = true
 	}
 
-	s.pitch = float(p)
+	if p < -1 {
+		p = -1
+	}
+	if p > 1 {
+		p = 1
+	}
+	s.pan = float(p)
 }
 
-func (s *soundSource) Pitch() float64 {
-	return float64(s.pitch)
+func (s *soundSource) Pan() float64 {
+	return float64(s.pan)
 }
 
 func (s *soundSource) Playing() bool {
