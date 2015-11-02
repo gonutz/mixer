@@ -98,12 +98,15 @@ func surroundError(with string, err error) error {
 func makeError(funcName string, result C.HRESULT, context C.int) error {
 	err := convertHRESULTtoError(result)
 	if err == nil {
+		if context != C.NoError {
+			// at this point DirectSound reported no error but the function
+			// failed anyway
+			return fmt.Errorf("%s: %s", funcName, contextDescription(context))
+		}
 		return nil
 	}
-	return fmt.Errorf(
-		"%s (%s): %s",
-		funcName, contextDescription(context), err.Error(),
-	)
+	return fmt.Errorf("%s (%s): %s",
+		funcName, contextDescription(context), err.Error())
 }
 
 func convertHRESULTtoError(result C.HRESULT) error {

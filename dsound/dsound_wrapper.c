@@ -10,6 +10,8 @@ typedef HRESULT WINAPI direct_sound_create(
 	LPDIRECTSOUND* ppDS,
 	LPUNKNOWN outer);
 
+#define ReleaseObject(obj) if (obj) {obj->lpVtbl->Release(obj);	obj = 0;}
+
 HRESULT initDirectSound(DWORD samplesPerSecond, int* errorContext) {
 	*errorContext = NoError;
 	HRESULT result = DS_OK;
@@ -29,11 +31,10 @@ HRESULT initDirectSound(DWORD samplesPerSecond, int* errorContext) {
 
 	LPDIRECTSOUND directSound;
 	result = DirectSoundCreate(0, &directSound, 0);
-	if (!SUCCEEDED(result)) {
+	if (!SUCCEEDED(result) || !directSound) {
 		*errorContext = DirectSoundCreateFailed;
 		return result;
 	}
-	DirectSoundObject = directSound;
 
 	// TODO second parameter should be the window handle
 	result = directSound->lpVtbl->SetCooperativeLevel(
@@ -42,6 +43,7 @@ HRESULT initDirectSound(DWORD samplesPerSecond, int* errorContext) {
 		DSSCL_PRIORITY
 	);
 	if (!SUCCEEDED(result)) {
+		ReleaseObject(directSound);
 		*errorContext = SetCooperativeLevelFailed;
 		return result;
 	}
@@ -57,11 +59,11 @@ HRESULT initDirectSound(DWORD samplesPerSecond, int* errorContext) {
 		&primaryBuffer,
 		0
 	);
-	if (!SUCCEEDED(result)) {
+	if (!SUCCEEDED(result) || !primaryBuffer) {
+		ReleaseObject(directSound);
 		*errorContext = CreatePrimarySoundBufferFailed;
 		return result;
 	}
-	PrimarySoundBuffer = primaryBuffer;
 
 	WAVEFORMATEX waveFormat = {0};
 	waveFormat.wFormatTag      = WAVE_FORMAT_PCM;
@@ -72,6 +74,8 @@ HRESULT initDirectSound(DWORD samplesPerSecond, int* errorContext) {
 	waveFormat.nAvgBytesPerSec = waveFormat.nSamplesPerSec*waveFormat.nBlockAlign;
 	result = primaryBuffer->lpVtbl->SetFormat(primaryBuffer, &waveFormat);
 	if (!SUCCEEDED(result)) {
+		ReleaseObject(primaryBuffer);
+		ReleaseObject(directSound);
 		*errorContext = PrimarySetFormatFailed;
 		return result;
 	}
@@ -96,18 +100,20 @@ HRESULT initDirectSound(DWORD samplesPerSecond, int* errorContext) {
 		&secondaryBuffer,
 		0
 	);
-	if (!SUCCEEDED(result)) {
+	if (!SUCCEEDED(result) || !secondaryBuffer) {
+		ReleaseObject(primaryBuffer);
+		ReleaseObject(directSound);
 		*errorContext = CreateSecondarySoundBufferFailed;
 		return result;
 	}
 
+	DirectSoundObject = directSound;
+	PrimarySoundBuffer = primaryBuffer;
 	GlobalSoundBuffer = secondaryBuffer;
 
 	*errorContext = NoError;
 	return DS_OK;
 }
-
-#define ReleaseObject(obj) if (obj) {obj->lpVtbl->Release(obj);	obj = 0;}
 
 void closeDirectSound() {
 	bufferSize = 0;
