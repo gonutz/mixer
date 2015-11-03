@@ -1,5 +1,4 @@
 // TODO package doc
-// TODO make sure sample length are % 4 so there is no []byte index panic
 
 package mixer
 
@@ -10,73 +9,7 @@ import (
 	"time"
 )
 
-type Mixer interface {
-	Start()
-	Stop() error
-	Play(*wav.Wave) Sound
-	SetVolume(float64)
-	Error() error
-}
-
-// TODO maybe be able to set the volume per channel instead of only changing
-// the pan, this way a higher level lib can provide pan change functionality
-// and additional operations; on the other hand this lib could provide other
-// functions as well when needed or simplye give the user the per-channel volume
-// so she can do it herself.
-type Sound interface {
-	//Play()
-	//Stop()
-
-	SetPaused(bool)
-
-	Paused() bool
-
-	//SetPositionOffset(time.Duration)
-
-	Playing() bool
-
-	// SetVolume sets the volume factor for all channels. Its range is [0..1]
-	// and it will be clamped to that range.
-	// Note that the audible difference in loudness between 100% and 50% is the
-	// same as between 50% and 25% and so on. Changing the sound on a
-	// logarithmic scale will sound to the human ear as if you decrease the
-	// sound by equal steps.
-	SetVolume(float64)
-
-	// Volume returns a value in the range of 0 (silent) to 1 (full volume).
-	Volume() float64
-
-	// SetPan changes the volume ratio between left and right output channel.
-	// Setting it to -1 will make channel 1 (left speaker) output at 100% volume
-	// while channel 2 (right speaker) has a volume of 0%.
-	// A pan of 0 means both speakers' volumes are at 100%, +1 means the left
-	// speaker is silenced.
-	// This value is clamped to [-1..1]
-	SetPan(float64)
-
-	// Pan returns the current pan as a value in the range of -1 (only left
-	// speaker) to 1 (only right speaker). A value of 0 means both speakers play
-	// at full volume.
-	Pan() float64
-}
-
-func New() Mixer {
-	const bytesPerSecond = 44100 * 2      // TODO init DS here and set this
-	writeAhead := bytesPerSecond / 10     // buffer 100ms
-	const sampleSize = 4                  // 2 channels, 16 bit each
-	writeAhead -= writeAhead % sampleSize // should be dividable into samples
-	buffer := make([]byte, writeAhead)
-
-	return &mixer{
-		volume:      1,
-		updateDelay: 10 * time.Millisecond,
-		changed:     &syncBool{},
-		stop:        make(chan bool),
-		mixBuffer:   buffer,
-	}
-}
-
-type mixer struct {
+var (
 	// writeCursor keeps the offset into DirectSound's ring buffer at which data
 	// was written last
 	writeCursor uint
@@ -85,18 +18,12 @@ type mixer struct {
 	// sound output is mixed
 	sources []*soundSource
 
-	// changed indicates that the pre-written sound data needs to be updated
-	// because the state since pre-computing it has changed
-	changed *syncBool
+	// lock is for changes to the mixer state and changes to the sound, these
+	// must not occur while mixing sound data
+	lock sync.Mutex
 
 	// volume is in the range from 0 (silent) to 1 (full volume)
 	volume float
-
-	// updateDelay is the time between two updates of the mixer
-	updateDelay time.Duration
-
-	// playing indicates that the sound card is currently outputting sound
-	playing bool
 
 	// stop is a signalling so the mixer knows when to stop updating (which
 	// happens in a separate Go routine)
@@ -107,94 +34,96 @@ type mixer struct {
 	// future
 	mixBuffer []byte
 
-	// err keeps the last error encountered by the mixer; it can be queried by
-	// the client with the Error function
-	err error
-}
+	// lastError keeps the last error encountered by the mixer; it can be
+	// queried by the client with the Error function
+	lastError error
+)
 
-type syncBool struct {
-	sync.Mutex
-	value bool
-}
+const sampleSize = 4 // 2 channels, 16 bit each
+const bytesPerSecond = 44100 * sampleSize
 
-func (m *mixer) Error() error {
-	return m.err // TODO assign this when an error occurs
-}
+func Init() error {
+	if err := dsound.Init(44100); err != nil {
+		return err
+	}
 
-func (m *mixer) Start() {
-	// TODO init DirectSound here and set it to desired parameters
+	writeAhead := bytesPerSecond / 10 // buffer 100ms
 
+	writeAhead -= writeAhead % sampleSize // should be dividable into samples
+	mixBuffer = make([]byte, writeAhead)
+	volume = 1
+
+	if err := dsound.WriteToSoundBuffer(remix(), 0); err != nil {
+		return err
+	}
+	if err := dsound.StartSound(); err != nil {
+		return err
+	}
+
+	stop = make(chan bool, 1)
 	go func() {
-		pulse := time.Tick(m.updateDelay) // make the delay const
+		pulse := time.Tick(10 * time.Millisecond)
 		for {
 			select {
 			case <-pulse:
-				m.update()
-			case <-m.stop:
+				update()
+				if lastError != nil {
+					return
+				}
+			case <-stop:
 				return
 			default:
 				time.Sleep(1 * time.Millisecond)
 			}
 		}
 	}()
+
+	return nil
 }
 
 // Stop blocks until playing sound is stopped.
-func (m *mixer) Stop() error {
-	m.stop <- true
-	m.playing = false
-	return dsound.StopSound()
+func Close() {
+	stop <- true
+	dsound.StopSound()
+	dsound.Close()
 }
 
-// TODO handle all errors (dsound calls)
-func (m *mixer) update() {
-	m.changed.Lock()
-	defer m.changed.Unlock()
+func Error() error {
+	return lastError
+}
 
-	if !m.playing { // TODO put this condition in Start(), it is only done once
-		if len(m.sources) == 0 {
-			// started without any sounds -> initialize the whole buffer to 0
-			silence := make([]byte, dsound.BufferSize())
-			dsound.WriteToSoundBuffer(silence, 0) // TODO error handling
+func update() {
+	lock.Lock()
+	defer lock.Unlock()
+
+	_, write, err := dsound.GetPlayAndWriteCursors()
+	if err != nil {
+		lastError = err
+		return
+	}
+	if write != writeCursor {
+		var delta uint
+		if write > writeCursor {
+			delta = write - writeCursor
 		} else {
-			// start playing the given sound sources, write cursor is at 0 (as
-			// is the play cursor)
-			dsound.WriteToSoundBuffer(m.remix(), 0)
+			// wrap-around happened
+			delta = write + dsound.BufferSize() - writeCursor
 		}
-		dsound.StartSound()
-		m.playing = true
-	} else {
-		m.changed.value = true // TODO remove this or maybe make this the default?
-		if m.changed.value {
-			play, write, _ := dsound.GetPlayAndWriteCursors()
-			if write != m.writeCursor {
-				var delta uint
-				if write > m.writeCursor {
-					delta = write - m.writeCursor
-				} else {
-					// wrap-around happened
-					delta = write + dsound.BufferSize() - m.writeCursor
-				}
-				m.makeSourcesForget(int(delta))
+		makeSourcesForget(int(delta))
 
-				// rewrite the whole look-ahead with newly mixed data
-				dsound.WriteToSoundBuffer(m.remix(), write)
-			}
-			_, m.writeCursor = play, write
-			m.changed.value = false
-		} else {
-			// TODO instead of re-writing the whole look-ahead, only compute the
-			// sound data that is not yet written and append it at the end of
-			// what is already written, e.g.
-			//dsound.WriteToSoundBuffer(m.mix(), write+writeAheadByteCount-m.writeCursor)?
+		// rewrite the whole look-ahead with newly mixed data
+		lastError = dsound.WriteToSoundBuffer(remix(), write)
+		if lastError != nil {
+			return
 		}
 	}
+	writeCursor = write
 }
 
-func (m *mixer) remix() []byte {
-	for i := 0; i < len(m.mixBuffer); i += 2 {
+func remix() []byte {
+	for i := 0; i < len(mixBuffer); i += 2 {
 		var f float
-		for _, source := range m.sources {
+		for _, source := range sources {
 			if source.paused {
 				continue
 			}
@@ -207,10 +136,10 @@ func (m *mixer) remix() []byte {
 			}
 			f += source.floatSampleAt(i) * factor
 		}
-		f *= m.volume
-		m.mixBuffer[i], m.mixBuffer[i+1] = floatSampleToBytes(f)
+		f *= volume
+		mixBuffer[i], mixBuffer[i+1] = floatSampleToBytes(f)
 	}
-	return m.mixBuffer
+	return mixBuffer
 }
 
 func bytesToFloatSample(b1, b2 byte) float {
@@ -240,83 +169,66 @@ func roundFloatToInt16(f float) int16 {
 	return int16(f - 0.5)
 }
 
-func (m *mixer) makeSourcesForget(byteCount int) {
-	atLeastOneSourceIsDone := false
-	for _, source := range m.sources {
-		if source.paused {
-			continue
-		}
-		source.forget(byteCount)
-		if source.isDone() {
-			atLeastOneSourceIsDone = true
-		}
-	}
-
-	if atLeastOneSourceIsDone {
-		for i := 0; i < len(m.sources); i++ {
-			if m.sources[i].isDone() {
-				m.sources[i].mixer = nil
-				m.sources = append(m.sources[:i], m.sources[i+1:]...)
-				i--
-			}
+func makeSourcesForget(byteCount int) {
+	for _, source := range sources {
+		if !source.paused {
+			source.forget(byteCount)
 		}
 	}
 }
 
-func (m *mixer) Play(sound *wav.Wave) Sound {
-	m.changed.Lock()
-	defer m.changed.Unlock()
-	m.changed.value = true
-
-	source := newSoundSource(sound, m)
-	m.sources = append(m.sources, source)
-	return source
-}
-
-func (m *mixer) SetVolume(v float64) {
-	m.changed.Lock()
-	defer m.changed.Unlock()
-	m.changed.value = true
-
-	if v < 0 {
-		v = 0
-	}
-	m.volume = float(v)
-}
-
-// soundSource
-
-func newSoundSource(w *wav.Wave, m *mixer) *soundSource {
-	return &soundSource{
-		data:   w.Data,
-		mixer:  m,
-		volume: 1,
-	}
-}
-
-// TODO handle frequency modulation in here (fitting source to destination
-// samples/sec)?
-type soundSource struct {
-	data   []byte
-	mixer  *mixer
-	paused bool
-	volume float
-	pan    float
-}
-
-func (s *soundSource) SetVolume(v float64) {
-	if s.mixer != nil {
-		s.mixer.changed.Lock()
-		defer s.mixer.changed.Unlock()
-		s.mixer.changed.value = true
-	}
-
+func SetVolume(v float64) {
 	if v < 0 {
 		v = 0
 	}
 	if v > 1 {
 		v = 1
 	}
+
+	lock.Lock()
+	defer lock.Unlock()
+
+	volume = float(v)
+}
+
+func Play(sound *wav.Wave) Sound {
+	sound = wav.ConvertTo44100Hz2Channels16BitSamples(sound)
+	source := newSoundSource(sound)
+
+	lock.Lock()
+	defer lock.Unlock()
+
+	sources = append(sources, source)
+	return source
+}
+
+// soundSource
+
+func newSoundSource(w *wav.Wave) *soundSource {
+	return &soundSource{data: w.Data, volume: 1}
+}
+
+// TODO handle frequency modulation in here (fitting source to destination
+// samples/sec)?
+type soundSource struct {
+	data   []byte
+	cursor int
+	paused bool
+	volume float
+	pan    float
+}
+
+func (s *soundSource) SetVolume(v float64) {
+	if v < 0 {
+		v = 0
+	}
+	if v > 1 {
+		v = 1
+	}
+
+	lock.Lock()
+	defer lock.Unlock()
+
 	s.volume = float(v)
 }
 
@@ -325,18 +237,16 @@ func (s *soundSource) Volume() float64 {
 }
 
 func (s *soundSource) SetPan(p float64) {
-	if s.mixer != nil {
-		s.mixer.changed.Lock()
-		defer s.mixer.changed.Unlock()
-		s.mixer.changed.value = true
-	}
-
 	if p < -1 {
 		p = -1
 	}
 	if p > 1 {
 		p = 1
 	}
+
+	lock.Lock()
+	defer lock.Unlock()
+
 	s.pan = float(p)
 }
 
@@ -349,18 +259,18 @@ func (s *soundSource) Playing() bool {
 }
 
 func (s *soundSource) isDone() bool {
-	return len(s.data) == 0
+	return s.cursor >= len(s.data)
 }
 
 func (s *soundSource) forget(byteCount int) {
-	if len(s.data) <= byteCount {
-		s.data = nil
-	} else {
-		s.data = s.data[byteCount:]
+	s.cursor += byteCount
+	if s.cursor > len(s.data) {
+		s.cursor = len(s.data)
 	}
 }
 
 func (s *soundSource) floatSampleAt(index int) float {
+	index += s.cursor
 	if index+1 > len(s.data) {
 		return 0
 	}
@@ -373,4 +283,25 @@ func (s *soundSource) SetPaused(paused bool) {
 
 func (s *soundSource) Paused() bool {
 	return s.paused
+}
+
+func (s *soundSource) Length() time.Duration {
+	return time.Duration(float64(len(s.data))/bytesPerSecond*1000000000) * time.Nanosecond
+}
+
+func (s *soundSource) Position() time.Duration {
+	return time.Duration(float64(s.cursor)/bytesPerSecond*1000000000) * time.Nanosecond
+}
+
+func (s *soundSource) SetPosition(pos time.Duration) {
+	lock.Lock()
+	defer lock.Unlock()
+
+	s.cursor = int(bytesPerSecond*pos.Seconds() + 0.5)
+	if s.cursor < 0 {
+		s.cursor = 0
+	}
+	if s.cursor > len(s.data) {
+		s.cursor = len(s.data)
+	}
 }
