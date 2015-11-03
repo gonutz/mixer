@@ -5,7 +5,7 @@ import "time"
 // TODO maybe be able to set the volume per channel instead of only changing
 // the pan, this way a higher level lib can provide pan change functionality
 // and additional operations; on the other hand this lib could provide other
-// functions as well when needed or simplye give the user the per-channel volume
+// functions as well when needed or simply give the user the per-channel volume
 // so she can do it herself.
 type Sound interface {
 	// SetPaused starts or stops the sound. Note that the sound position is not

@@ -40,16 +40,16 @@ var (
 	lastError error
 )
 
-const sampleSize = 4 // 2 channels, 16 bit each
-const bytesPerSecond = 44100 * sampleSize
+const bytesPerSample = 4 // 2 channels, 16 bit each
+const bytesPerSecond = 44100 * bytesPerSample
 
 func Init() error {
 	if err := dsound.Init(44100); err != nil {
 		return err
 	}
 
-	writeAhead := bytesPerSecond / 10     // buffer 100ms
-	writeAhead -= writeAhead % sampleSize // should be dividable into samples
+	writeAhead := bytesPerSecond / 10         // buffer 100ms
+	writeAhead -= writeAhead % bytesPerSample // should be dividable into samples
 	mixBuffer = make([]byte, writeAhead)
 	volume = 1
 
