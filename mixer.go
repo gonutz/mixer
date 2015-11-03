@@ -1,4 +1,5 @@
 // TODO package doc
+// TODO make sound source releasable
 
 package mixer
 
@@ -47,13 +48,12 @@ func Init() error {
 		return err
 	}
 
-	writeAhead := bytesPerSecond / 10 // buffer 100ms
-
+	writeAhead := bytesPerSecond / 10     // buffer 100ms
 	writeAhead -= writeAhead % sampleSize // should be dividable into samples
 	mixBuffer = make([]byte, writeAhead)
 	volume = 1
 
-	if err := dsound.WriteToSoundBuffer(remix(), 0); err != nil {
+	if err := dsound.WriteToSoundBuffer(mix(), 0); err != nil {
 		return err
 	}
 	if err := dsound.StartSound(); err != nil {
@@ -106,13 +106,13 @@ func update() {
 		if write > writeCursor {
 			delta = write - writeCursor
 		} else {
-			// wrap-around happened
+			// wrap-around happened in DirectSound's ring buffer
 			delta = write + dsound.BufferSize() - writeCursor
 		}
-		makeSourcesForget(int(delta))
+		advanceSourcesBy(int(delta))
 
 		// rewrite the whole look-ahead with newly mixed data
-		lastError = dsound.WriteToSoundBuffer(remix(), write)
+		lastError = dsound.WriteToSoundBuffer(mix(), write)
 		if lastError != nil {
 			return
 		}
@@ -120,7 +120,7 @@ func update() {
 	writeCursor = write
 }
 
-func remix() []byte {
+func mix() []byte {
 	for i := 0; i < len(mixBuffer); i += 2 {
 		var f float
 		for _, source := range sources {
@@ -169,10 +169,10 @@ func roundFloatToInt16(f float) int16 {
 	return int16(f - 0.5)
 }
 
-func makeSourcesForget(byteCount int) {
+func advanceSourcesBy(byteCount int) {
 	for _, source := range sources {
 		if !source.paused {
-			source.forget(byteCount)
+			source.advanceBy(byteCount)
 		}
 	}
 }
@@ -191,7 +191,10 @@ func SetVolume(v float64) {
 	volume = float(v)
 }
 
-func Play(sound *wav.Wave) Sound {
+// NewSound creates a new sound source from the given wave data and starts
+// playing it right away. You can call SetPlaying(false) on the returned sound
+// if you do not want to play the sound right away.
+func NewSound(sound *wav.Wave) Sound {
 	sound = wav.ConvertTo44100Hz2Channels16BitSamples(sound)
 	source := newSoundSource(sound)
 
@@ -202,14 +205,10 @@ func Play(sound *wav.Wave) Sound {
 	return source
 }
 
-// soundSource
-
 func newSoundSource(w *wav.Wave) *soundSource {
 	return &soundSource{data: w.Data, volume: 1}
 }
 
-// TODO handle frequency modulation in here (fitting source to destination
-// samples/sec)?
 type soundSource struct {
 	data   []byte
 	cursor int
@@ -255,14 +254,14 @@ func (s *soundSource) Pan() float64 {
 }
 
 func (s *soundSource) Playing() bool {
-	return len(s.data) != 0 && !s.paused
+	return !s.paused && s.cursor < len(s.data)
 }
 
 func (s *soundSource) isDone() bool {
 	return s.cursor >= len(s.data)
 }
 
-func (s *soundSource) forget(byteCount int) {
+func (s *soundSource) advanceBy(byteCount int) {
 	s.cursor += byteCount
 	if s.cursor > len(s.data) {
 		s.cursor = len(s.data)
@@ -278,6 +277,9 @@ func (s *soundSource) floatSampleAt(index int) float {
 }
 
 func (s *soundSource) SetPaused(paused bool) {
+	lock.Lock()
+	defer lock.Unlock()
+
 	s.paused = paused
 }
 

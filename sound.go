@@ -8,13 +8,21 @@ import "time"
 // functions as well when needed or simplye give the user the per-channel volume
 // so she can do it herself.
 type Sound interface {
-	//Play()
-	//Stop()
-
+	// SetPaused starts or stops the sound. Note that the sound position is not
+	// changed with this function, meaning that if the sound is not playing
+	// because it was played all the way to the end, calling SetPaused(false)
+	// will not restart it from the beginning. You have to call SetPosition(0)
+	// to reset the sound to the start. If the sound is not paused, it will then
+	// play right away.
 	SetPaused(bool)
 
+	// Paused returns the last value set in SetPaused. It does not consider
+	// whether the sound is being played right now. It may not be paused but
+	// could have reached the end and thus is not audible although not paused.
 	Paused() bool
 
+	// Playing returns true if the sound is not paused and has not reached the
+	// end.
 	Playing() bool
 
 	// SetVolume sets the volume factor for all channels. Its range is [0..1]
