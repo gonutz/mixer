@@ -31,10 +31,10 @@ type Sound interface {
 	// same as between 50% and 25% and so on. Changing the sound on a
 	// logarithmic scale will sound to the human ear as if you decrease the
 	// sound by equal steps.
-	SetVolume(float64)
+	SetVolume(float32)
 
 	// Volume returns a value in the range of 0 (silent) to 1 (full volume).
-	Volume() float64
+	Volume() float32
 
 	// SetPan changes the volume ratio between left and right output channel.
 	// Setting it to -1 will make channel 1 (left speaker) output at 100% volume
@@ -42,12 +42,12 @@ type Sound interface {
 	// A pan of 0 means both speakers' volumes are at 100%, +1 means the left
 	// speaker is silenced.
 	// This value is clamped to [-1..1]
-	SetPan(float64)
+	SetPan(float32)
 
 	// Pan returns the current pan as a value in the range of -1 (only left
 	// speaker) to 1 (only right speaker). A value of 0 means both speakers play
 	// at full volume.
-	Pan() float64
+	Pan() float32
 
 	// Length is the length of the whole sound, it does not consider how far it
 	// is already played or if it loops or not.
