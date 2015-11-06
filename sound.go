@@ -2,11 +2,6 @@ package mixer
 
 import "time"
 
-// TODO maybe be able to set the volume per channel instead of only changing
-// the pan, this way a higher level lib can provide pan change functionality
-// and additional operations; on the other hand this lib could provide other
-// functions as well when needed or simply give the user the per-channel volume
-// so she can do it herself.
 type Sound interface {
 	// SetPaused starts or stops the sound. Note that the sound position is not
 	// changed with this function, meaning that if the sound is not playing
@@ -24,6 +19,11 @@ type Sound interface {
 	// Playing returns true if the sound is not paused and has not reached the
 	// end.
 	Playing() bool
+
+	// Stopped returns true if the sound has been fully played. This means that
+	// the user cannot use the sound anymore. Set the pointer to nil in this
+	// case so that the Go runtime can free its memory on the next GC.
+	Stopped() bool
 
 	// SetVolume sets the volume factor for all channels. Its range is [0..1]
 	// and it will be clamped to that range.
@@ -60,4 +60,149 @@ type Sound interface {
 	// Position is the current offset from the start of the sound. It changes
 	// while the sound is played.
 	Position() time.Duration
+}
+
+type sound struct {
+	source                        *soundSource
+	cursor                        int
+	paused                        bool
+	volume                        float32
+	pan                           float32
+	leftPanFactor, rightPanFactor float32
+}
+
+func (s *sound) SetPaused(paused bool) {
+	if s.source == nil {
+		return
+	}
+
+	lock.Lock()
+	defer lock.Unlock()
+
+	s.paused = paused
+}
+
+func (s *sound) Paused() bool {
+	return s.paused
+}
+
+func (s *sound) Playing() bool {
+	return !s.paused && s.source != nil && s.cursor < len(s.source.left)
+}
+
+func (s *sound) Stopped() bool {
+	return s.source == nil
+}
+
+func (s *sound) SetVolume(v float32) {
+	if s.source == nil {
+		return
+	}
+
+	if v < 0 {
+		v = 0
+	}
+	if v > 1 {
+		v = 1
+	}
+
+	lock.Lock()
+	defer lock.Unlock()
+
+	s.volume = v
+}
+
+func (s *sound) Volume() float32 {
+	return s.volume
+}
+
+func (s *sound) SetPan(p float32) {
+	if s.source == nil {
+		return
+	}
+
+	if p < -1 {
+		p = -1
+	}
+	if p > 1 {
+		p = 1
+	}
+
+	left, right := float32(1), float32(1)
+	if p < 0 {
+		right = 1 + p
+	}
+	if p > 0 {
+		left = 1 - p
+	}
+
+	lock.Lock()
+	defer lock.Unlock()
+
+	s.pan = p
+	s.leftPanFactor, s.rightPanFactor = left, right
+}
+
+func (s *sound) Pan() float32 {
+	return float32(s.pan)
+}
+
+func (s *sound) Length() time.Duration {
+	if s.source == nil {
+		return 0
+	}
+	return s.source.Length() // TODO * loops
+}
+
+func (s *sound) SetPosition(pos time.Duration) {
+	if s.source == nil {
+		return
+	}
+
+	lock.Lock()
+	defer lock.Unlock()
+
+	s.cursor = int(bytesPerSecond*pos.Seconds()/4.0 + 0.5)
+	if s.cursor < 0 {
+		s.cursor = 0
+	}
+	if s.cursor > len(s.source.left) {
+		s.cursor = len(s.source.left)
+	}
+}
+
+func (s *sound) Position() time.Duration {
+	return time.Duration(float64(s.cursor)/bytesPerSecond*4000000000) * time.Nanosecond
+}
+
+func (s *sound) advanceBySamples(sampleCount int) {
+	s.cursor += sampleCount
+	if s.cursor > len(s.source.left) {
+		s.cursor = len(s.source.left)
+	}
+}
+
+func (s *sound) addToMixBuffer() {
+	if s.paused {
+		return
+	}
+
+	writeTo := s.cursor + len(leftBuffer)
+	if writeTo > len(s.source.left) {
+		writeTo = len(s.source.left)
+	}
+
+	leftFactor := s.volume * s.leftPanFactor
+	rightFactor := s.volume * s.rightPanFactor
+	out := 0
+	for i := s.cursor; i < writeTo; i++ {
+		leftBuffer[out] += s.source.left[i] * leftFactor
+		rightBuffer[out] += s.source.right[i] * rightFactor
+		out++
+	}
+}
+
+func (s *sound) isOver() bool {
+	// TODO consider loops
+	return s.cursor >= len(s.source.left)
 }

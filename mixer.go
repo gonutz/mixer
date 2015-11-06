@@ -1,5 +1,22 @@
-// TODO package doc
-// TODO make sound source releasable
+// Package mixer does provides an abstraction over the sound card to be able to
+// play multiple sounds with different settings.
+// Call Init to start the mixer and Close when you are done with it.
+// Call NewSoundSource to create a sound source from PCM data. You can use this
+// source to play the sound using the Play... functions. Each call will give you
+// a Sound which represents that particular instance of the sound source that
+// is then played. You can change its parameters, pause and resume it and change
+// its position. Once the Sound is done playing, its Stopped function will
+// return true. In this case you cannot use the Sound anymore and should set its
+// pointer to nil so the Go garbage collector can remove it. Calling any
+// function on a Stopped Sound has no effect.
+package mixer
+
+import (
+	"github.com/gonutz/mixer/dsound"
+	"sync"
+	"time"
+)
+
 // TODO right now the volume and pan only change in discrete chunks, whenever
 // the sound buffer is written. To be accurate, individual samples would have
 // to be modified depeding on when they are played, this can get hairy to
@@ -7,23 +24,14 @@
 // solution is good enough
 // TODO have SetPitch in Sound? Or In SoundSource?
 
-package mixer
-
-import (
-	"github.com/gonutz/mixer/dsound"
-	"github.com/gonutz/mixer/wav"
-	"sync"
-	"time"
-)
-
 var (
 	// writeCursor keeps the offset into DirectSound's ring buffer at which data
 	// was written last
 	writeCursor uint
 
-	// sources are all currently active sound sources from which the mixed
-	// sound output is computed
-	sources []*soundSource
+	// sounds are all currently active sounds (they might be paused) from which
+	// the mixed sound output is computed
+	sounds []*sound
 
 	// lock is for changes to the mixer state and changes to the sound, these
 	// must not occur while mixing sound data
@@ -40,19 +48,36 @@ var (
 	// mixBuffer and writeAheadBuffer are the buffers for mixing the sound
 	// sources; their size determines the time of the sound that will be output
 	// for future playing in every mixer update
-	mixBuffer               []float32
+	writeAheadBuffer []byte
+	mixBuffer        []float32
+	// leftBuffer and rightBuffer are simply pointers into the mixBuffer's first
+	// and second half
 	leftBuffer, rightBuffer []float32
-	writeAheadBuffer        []byte
 
 	// lastError keeps the last error encountered by the mixer; it can be
 	// queried by the client using the Error function
 	lastError error
+
+	// inited is used to coordinate multiple and/or concurrent calls to Init
+	// and Close
+	inited   bool
+	initLock sync.Mutex
 )
 
 const bytesPerSample = 4 // 2 channels, 16 bit each
 const bytesPerSecond = 44100 * bytesPerSample
 
+// Init sets up DirectSound and prepares for mixing and playing sounds. It
+// starts a Go routine that periodically writes to the sound buffer to output
+// to the sound card.
+// Call Close when you are done with the mixer.
 func Init() error {
+	initLock.Lock()
+	defer initLock.Unlock()
+	if inited {
+		return nil
+	}
+
 	if err := dsound.Init(44100); err != nil {
 		return err
 	}
@@ -62,10 +87,11 @@ func Init() error {
 	writeAheadByteCount -= writeAheadByteCount % bytesPerSample
 	writeAheadBuffer = make([]byte, writeAheadByteCount)
 	mixBuffer = make([]float32, writeAheadByteCount/2) // 2 bytes form one value
-	leftBuffer, rightBuffer = mixBuffer[:len(mixBuffer)/2], mixBuffer[len(mixBuffer)/2:]
+	leftBuffer = mixBuffer[:len(mixBuffer)/2]
+	rightBuffer = mixBuffer[len(mixBuffer)/2:]
 	volume = 1
 
-	if err := dsound.WriteToSoundBuffer(mix(), 0); err != nil {
+	if err := dsound.WriteToSoundBuffer(writeAheadBuffer, 0); err != nil {
 		return err
 	}
 	if err := dsound.StartSound(); err != nil {
@@ -90,19 +116,48 @@ func Init() error {
 		}
 	}()
 
+	inited = true
+
 	return nil
 }
 
 // Close blocks until playing sound is stopped. It shuts down the DirectSound
 // system.
 func Close() {
+	initLock.Lock()
+	defer initLock.Unlock()
+	if !inited {
+		return
+	}
+
 	stop <- true
 	dsound.StopSound()
 	dsound.Close()
+
+	inited = false
 }
 
+// Error returns the last error that occurred. If a fatal error occurs, the Go
+// routine for mixing and playing sounds might stop before you call Close. In
+// this case, call Error to retrieve the cause of the failure.
 func Error() error {
 	return lastError
+}
+
+// SetVolume sets the master volume. All sounds will be scaled by this factor.
+// It is in the range [0..1] and will be clamped to it.
+func SetVolume(v float32) {
+	if v < 0 {
+		v = 0
+	}
+	if v > 1 {
+		v = 1
+	}
+
+	lock.Lock()
+	defer lock.Unlock()
+
+	volume = v
 }
 
 func update() {
@@ -122,7 +177,7 @@ func update() {
 			// wrap-around happened in DirectSound's ring buffer
 			delta = write + dsound.BufferSize() - writeCursor
 		}
-		advanceSourcesByBytes(int(delta))
+		advanceSoundsByBytes(int(delta))
 
 		// rewrite the whole look-ahead with newly mixed data
 		lastError = dsound.WriteToSoundBuffer(mix(), write)
@@ -133,33 +188,13 @@ func update() {
 	writeCursor = write
 }
 
-func (s *soundSource) addToMixBuffer() {
-	if s.paused {
-		return
-	}
-
-	writeTo := s.cursor + len(leftBuffer)
-	if writeTo > len(s.left) {
-		writeTo = len(s.left)
-	}
-
-	leftFactor := s.volume * s.leftPanFactor
-	rightFactor := s.volume * s.rightPanFactor
-	out := 0
-	for i := s.cursor; i < writeTo; i++ {
-		leftBuffer[out] += s.left[i] * leftFactor
-		rightBuffer[out] += s.right[i] * rightFactor
-		out++
-	}
-}
-
 func mix() []byte {
 	for i := range mixBuffer {
 		mixBuffer[i] = 0.0
 	}
 
-	for _, source := range sources {
-		source.addToMixBuffer()
+	for _, sound := range sounds {
+		sound.addToMixBuffer()
 	}
 
 	out := 0
@@ -189,114 +224,17 @@ func floatToBytes(f float32) (lo, hi byte) {
 
 }
 
-func bytesToFloatSample(b1, b2 byte) float {
-	lo, hi := int16(uint16(b1)), int16(b2)
-	return float(lo + 256*hi)
-}
-
-func floatSampleToBytes(f float) (b1, b2 byte) {
-	// TODO check what happens when rounding to max or min, make sure
-	// values do not clip at these bounds
-	const min = -32768
-	const max = 32767
-	if f < min {
-		f = min + 0.1
-	}
-	if f > max {
-		f = max - 0.1
-	}
-	asInt16 := roundFloatToInt16(f)
-	return byte(asInt16 & 0xFF), byte((asInt16 >> 8) & 0xFF)
-}
-
-func roundFloatToInt16(f float) int16 {
-	if f > 0 {
-		return int16(f + 0.5)
-	}
-	return int16(f - 0.5)
-}
-
-func advanceSourcesByBytes(byteCount int) {
-	for _, source := range sources {
-		if !source.paused {
-			source.advanceBySamples(byteCount / 4)
+func advanceSoundsByBytes(byteCount int) {
+	for i := 0; i < len(sounds); i++ {
+		if !sounds[i].paused {
+			sounds[i].advanceBySamples(byteCount / 4)
+			if sounds[i].isOver() {
+				sounds[i].source = nil
+				sounds = append(sounds[:i], sounds[i+1:]...)
+				i--
+			}
 		}
 	}
-}
-
-func SetVolume(v float32) {
-	if v < 0 {
-		v = 0
-	}
-	if v > 1 {
-		v = 1
-	}
-
-	lock.Lock()
-	defer lock.Unlock()
-
-	volume = v
-}
-
-// NewSound creates a new sound source from the given wave data and starts
-// playing it right away. You can call SetPlaying(false) on the returned sound
-// if you do not want to play the sound right away.
-func NewSound(sound *wav.Wave) Sound {
-	left, right := makeTwoChannelFloats(sound)
-	source := newSoundSource(left, right)
-
-	lock.Lock()
-	defer lock.Unlock()
-
-	sources = append(sources, source)
-	return source
-}
-
-// TODO resample the right frequency
-func makeTwoChannelFloats(w *wav.Wave) (left, right []float32) {
-	if w.ChannelCount == 1 && w.BitsPerSample == 8 {
-		result := make([]float32, len(w.Data))
-		left = result
-		right = result
-		for i := range w.Data {
-			result[i] = byteToFloat(w.Data[i])
-		}
-	} else if w.ChannelCount == 1 && w.BitsPerSample == 16 {
-		result := make([]float32, len(w.Data)/2)
-		left = result
-		right = result
-		in := 0
-		for i := range result {
-			result[i] = makeFloat(w.Data[in], w.Data[in+1])
-			in += 2
-		}
-	} else if w.ChannelCount == 2 && w.BitsPerSample == 8 {
-		result := make([]float32, len(w.Data))
-		left, right = result[:len(result)/2], result[len(result)/2:]
-		in := 0
-		for i := range left {
-			left[i] = byteToFloat(w.Data[in])
-			right[i] = byteToFloat(w.Data[in+1])
-			in += 2
-		}
-	} else if w.ChannelCount == 2 && w.BitsPerSample == 16 {
-		data := w.Data
-		if len(data)%4 != 0 {
-			data = data[:len(data)-len(data)%4]
-		}
-		result := make([]float32, len(data)/2)
-		left, right = result[:len(result)/2], result[len(result)/2:]
-		in := 0
-		for i := range left {
-			left[i] = makeFloat(data[in], data[in+1])
-			right[i] = makeFloat(data[in+2], data[in+3])
-			in += 4
-		}
-	} else {
-		panic("unsupported format, must be 1/2 channels and 8/16 bit samples")
-		// TODO return an error here
-	}
-	return
 }
 
 func byteToFloat(b byte) float32 {
@@ -315,114 +253,4 @@ func makeFloat(b1, b2 byte) float32 {
 		return float32(val) / 32767
 	}
 	return float32(val) / 32768
-}
-
-// TODO make all float32 now float again? or remove the float altogether? or
-// use ints instead (then again have a precision or use int?
-
-func newSoundSource(left, right []float32) *soundSource {
-	return &soundSource{
-		left:           left,
-		right:          right,
-		volume:         1,
-		leftPanFactor:  1,
-		rightPanFactor: 1,
-	}
-}
-
-type soundSource struct {
-	left, right                   []float32
-	cursor                        int
-	paused                        bool
-	volume                        float32
-	pan                           float32
-	leftPanFactor, rightPanFactor float32
-}
-
-func (s *soundSource) SetVolume(v float32) {
-	if v < 0 {
-		v = 0
-	}
-	if v > 1 {
-		v = 1
-	}
-
-	lock.Lock()
-	defer lock.Unlock()
-
-	s.volume = v
-}
-
-func (s *soundSource) Volume() float32 {
-	return s.volume
-}
-
-func (s *soundSource) SetPan(p float32) {
-	if p < -1 {
-		p = -1
-	}
-	if p > 1 {
-		p = 1
-	}
-
-	left, right := float32(1), float32(1)
-	if p < 0 {
-		right = 1 + p
-	}
-	if p > 0 {
-		left = 1 - p
-	}
-
-	lock.Lock()
-	defer lock.Unlock()
-
-	s.pan = p
-	s.leftPanFactor, s.rightPanFactor = left, right
-}
-
-func (s *soundSource) Pan() float32 {
-	return float32(s.pan)
-}
-
-func (s *soundSource) Playing() bool {
-	return !s.paused && s.cursor < len(s.left)
-}
-
-func (s *soundSource) advanceBySamples(sampleCount int) {
-	s.cursor += sampleCount
-	if s.cursor > len(s.left) {
-		s.cursor = len(s.left)
-	}
-}
-
-func (s *soundSource) SetPaused(paused bool) {
-	lock.Lock()
-	defer lock.Unlock()
-
-	s.paused = paused
-}
-
-func (s *soundSource) Paused() bool {
-	return s.paused
-}
-
-func (s *soundSource) Length() time.Duration {
-	return time.Duration(float64(len(s.left))/bytesPerSecond*4000000000) * time.Nanosecond
-}
-
-func (s *soundSource) Position() time.Duration {
-	return time.Duration(float64(s.cursor)/bytesPerSecond*4000000000) * time.Nanosecond
-}
-
-func (s *soundSource) SetPosition(pos time.Duration) {
-	lock.Lock()
-	defer lock.Unlock()
-
-	s.cursor = int(bytesPerSecond*pos.Seconds()/4.0 + 0.5)
-	if s.cursor < 0 {
-		s.cursor = 0
-	}
-	if s.cursor > len(s.left) {
-		s.cursor = len(s.left)
-	}
 }

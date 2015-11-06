@@ -21,7 +21,7 @@ type Wave struct {
 	SamplesPerSecond int
 	BitsPerSample    int
 	Data             []byte
-	formatWasRead    bool
+	//formatWasRead    bool
 }
 
 // LoadFromFile opens the given file and calls Load on it.
@@ -59,7 +59,7 @@ func Load(r io.Reader) (*Wave, error) {
 	}
 
 	wav := &Wave{}
-	if err := wav.parse(bytes.NewReader(data)); err != nil {
+	if err := wav.parse(bytes.NewReader(data), false); err != nil {
 		return nil, err
 	}
 	return wav, nil
@@ -71,7 +71,7 @@ func loadErr(msg string, err error) error {
 
 var endiannes = binary.LittleEndian
 
-func (wav *Wave) parse(r *bytes.Reader) error {
+func (wav *Wave) parse(r *bytes.Reader, formatWasRead bool) error {
 	if r.Len() == 0 {
 		return nil
 	}
@@ -82,7 +82,7 @@ func (wav *Wave) parse(r *bytes.Reader) error {
 	}
 
 	if header.ChunkID == formatChunkID {
-		if wav.formatWasRead {
+		if formatWasRead {
 			return errors.New("load WAV: two format chunks detected")
 		}
 
@@ -114,7 +114,7 @@ func (wav *Wave) parse(r *bytes.Reader) error {
 		wav.ChannelCount = int(chunk.Channels)
 		wav.SamplesPerSecond = int(chunk.SamplesPerSec)
 		wav.BitsPerSample = int(chunk.BitsPerSample)
-		wav.formatWasRead = true
+		formatWasRead = true
 	} else if header.ChunkID == dataChunkID {
 		data := make([]byte, header.ChunkSize)
 		if _, err := io.ReadFull(r, data); err != nil {
@@ -124,7 +124,7 @@ func (wav *Wave) parse(r *bytes.Reader) error {
 		if len(wav.Data) > 0 {
 			return errors.New("load WAV: multiple data chunks found")
 		}
-		if !wav.formatWasRead {
+		if !formatWasRead {
 			return errors.New("load WAV: found data chunk before format chunk")
 		}
 		wav.Data = data
@@ -141,13 +141,13 @@ func (wav *Wave) parse(r *bytes.Reader) error {
 	}
 
 	if r.Len() == 0 {
-		if !wav.formatWasRead {
+		if !formatWasRead {
 			return errors.New("load WAV: file does not contain format information")
 		}
 		return nil
 	}
 
-	return wav.parse(r)
+	return wav.parse(r, formatWasRead)
 }
 
 // String prints the format information and data size in a human readable
