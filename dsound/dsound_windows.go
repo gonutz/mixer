@@ -43,7 +43,8 @@ func BufferSize() uint {
 }
 
 // StartSound must be called after initialization to make the sound buffer
-// audible.
+// audible. It will internally call Play on the DirectSound buffer with the
+// looping option so the sound plays forever (until you call StopSound).
 func StartSound() error {
 	var errContext C.int
 	result := C.startSound(&errContext)
@@ -72,7 +73,7 @@ func WriteToSoundBuffer(data []byte, offset uint) error {
 // offsets into the sound buffer. The range between the two is commited to the
 // sound card for playing so it is not safe to write into that area. According
 // to the DirectSound documentation this area is usually about 15ms worth of
-// data but a test on Windows 8 showed a value of 30ms.
+// data but a test on Windows 8.1 showed a value of 30ms.
 // Note that the sound buffer is a ring buffer which is why the play cursor,
 // which indicates the start of the commited region, can be a higher value than
 // the write cursor, which indicates the end of the commited region.
@@ -86,13 +87,6 @@ func GetPlayAndWriteCursors() (play, write uint, err error) {
 	play, write = uint(playCursor), uint(writeCursor)
 	err = makeError("getPlayAndWriteCursors", result, errContext)
 	return
-}
-
-func surroundError(with string, err error) error {
-	if err == nil {
-		return nil
-	}
-	return errors.New(with + err.Error())
 }
 
 func makeError(funcName string, result C.HRESULT, context C.int) error {

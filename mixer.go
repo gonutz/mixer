@@ -1,5 +1,6 @@
-// Package mixer does provides an abstraction over the sound card to be able to
-// play multiple sounds with different settings.
+// Package mixer provides an abstraction over the sound card to be able to play
+// multiple sounds simultaneously, combining different effects.
+//
 // Call Init to start the mixer and Close when you are done with it.
 // Call NewSoundSource to create a sound source from PCM data. You can use this
 // source to play the sound using the Play... functions. Each call will give you
@@ -45,7 +46,7 @@ var (
 	// when an error happened from which it cannot recover
 	stop chan bool
 
-	// mixBuffer and writeAheadBuffer are the buffers for mixing the sound
+	// writeAheadBuffer and mixBuffer are the buffers for mixing the sound
 	// sources; their size determines the time of the sound that will be output
 	// for future playing in every mixer update
 	writeAheadBuffer []byte
@@ -64,8 +65,10 @@ var (
 	initLock sync.Mutex
 )
 
-const bytesPerSample = 4 // 2 channels, 16 bit each
-const bytesPerSecond = 44100 * bytesPerSample
+const (
+	bytesPerSample = 4                      // 2 channels, 16 bit each
+	bytesPerSecond = 44100 * bytesPerSample // fixed sample frequency of 44100Hz
+)
 
 // Init sets up DirectSound and prepares for mixing and playing sounds. It
 // starts a Go routine that periodically writes to the sound buffer to output
@@ -91,6 +94,7 @@ func Init() error {
 	rightBuffer = mixBuffer[len(mixBuffer)/2:]
 	volume = 1
 
+	// initially write silence to sound buffer
 	if err := dsound.WriteToSoundBuffer(writeAheadBuffer, 0); err != nil {
 		return err
 	}
@@ -98,7 +102,7 @@ func Init() error {
 		return err
 	}
 
-	stop = make(chan bool, 1)
+	stop = make(chan bool)
 	go func() {
 		pulse := time.Tick(10 * time.Millisecond)
 		for {
