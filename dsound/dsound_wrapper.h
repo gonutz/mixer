@@ -1,5 +1,5 @@
 #include <windows.h>
-#include <dsound.h>
+#include "dsound_mingw.h"
 
 #define NoError                           0
 #define LoadLibraryFailed                 1
