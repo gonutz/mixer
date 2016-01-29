@@ -21,7 +21,6 @@ type Wave struct {
 	SamplesPerSecond int
 	BitsPerSample    int
 	Data             []byte
-	//formatWasRead    bool
 }
 
 // LoadFromFile opens the given file and calls Load on it.
