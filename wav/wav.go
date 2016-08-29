@@ -31,13 +31,13 @@ func LoadFromFile(path string) (*Wave, error) {
 	}
 	defer file.Close()
 
-	return Load(file)
+	return Read(file)
 }
 
-// Load loads sound data in the WAV format. It assumes that the data is in
+// Read reads sound data in the WAV format. It assumes that the data is in
 // uncompressed PCM format and has exactly one format chunk and one data chunk.
 // Unknown chunks are ignored.
-func Load(r io.Reader) (*Wave, error) {
+func Read(r io.Reader) (*Wave, error) {
 	var header waveHeader
 	if err := binary.Read(r, endiannes, &header); err != nil {
 		return nil, loadErr("reading 'RIFF' header", err)
