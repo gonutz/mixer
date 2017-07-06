@@ -23,7 +23,7 @@ type Wave struct {
 	Data             []byte
 }
 
-// LoadFromFile opens the given file and calls Load on it.
+// LoadFromFile opens the given file and calls Read on it.
 func LoadFromFile(path string) (*Wave, error) {
 	file, err := os.Open(path)
 	if err != nil {

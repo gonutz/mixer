@@ -2,8 +2,9 @@ package mixer
 
 import (
 	"fmt"
-	"github.com/gonutz/mixer/wav"
 	"time"
+
+	"github.com/gonutz/mixer/wav"
 )
 
 type SoundSource interface {

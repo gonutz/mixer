@@ -13,9 +13,10 @@
 package mixer
 
 import (
-	"github.com/gonutz/mixer/dsound"
 	"sync"
 	"time"
+
+	"github.com/gonutz/mixer/dsound"
 )
 
 // TODO right now the volume and pan only change in discrete chunks, whenever
