@@ -1,0 +1,4 @@
+github.com/gonutz/ds v1.0.0 h1:GBgZTs+Rvimvq9qM8jij3xi+rUZNf0bux95uTFvUkXQ=
+github.com/gonutz/ds v1.0.0/go.mod h1:nqfTfJeXtECo3mp5MH6EHAsruRB1z74bnhYQ6frgXoU=
+github.com/gonutz/w32/v2 v2.0.1 h1:GgPRCInDWUSAQR6Nfhr4f/Z47vb1ZHssjySOVfbbWnk=
+github.com/gonutz/w32/v2 v2.0.1/go.mod h1:MgtHx0AScDVNKyB+kjyPder4xIi3XAcHS6LDDU2DmdE=
